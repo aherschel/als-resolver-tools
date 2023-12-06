@@ -1,0 +1,7 @@
+type Query {
+  echo(message: String!): String!
+}
+
+type Mutation {
+  addUser(username: String!): String!
+}
