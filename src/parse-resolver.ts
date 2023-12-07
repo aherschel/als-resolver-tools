@@ -1,10 +1,24 @@
 import { ts } from '@ts-morph/bootstrap';
+import { DocumentNode, print } from 'graphql';
+import * as path from 'path';
+import { FieldDefinition, TypeDefinition, generateResolverAndTypes } from './graphql-schema-builder';
 
-const isHandlerFunction = (node: ts.Node): node is ts.VariableStatement => {
-  return node.kind === ts.SyntaxKind.VariableStatement
-    && (node as ts.VariableStatement).declarationList.declarations[0].name.getText() === 'handler'
-    && ((node as ts.VariableStatement).modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword) ?? false);
-};
+const isDefined = <T>(val?: T): val is T => val !== undefined && val !== null;
+const isVariableStatement = (node?: ts.Node): node is ts.VariableStatement => isDefined(node) && node.kind === ts.SyntaxKind.VariableStatement;
+const isArrowFunction = (node?: ts.Node): node is ts.ArrowFunction => isDefined(node) && node.kind === ts.SyntaxKind.ArrowFunction;
+const isTypeReference = (node?: ts.Node): node is ts.TypeReferenceNode => isDefined(node) && node.kind === ts.SyntaxKind.TypeReference;
+const isTypeLiteral = (node?: ts.Node): node is ts.TypeLiteralNode => isDefined(node) && node.kind === ts.SyntaxKind.TypeLiteral;
+const isCallExpression = (node?: ts.Node): node is ts.CallExpression => isDefined(node) && node.kind === ts.SyntaxKind.CallExpression;
+const isPropertyAccessExpression = (node?: ts.Node): node is ts.PropertyAccessExpression => isDefined(node) && node.kind === ts.SyntaxKind.PropertyAccessExpression;
+const isImportDeclaration = (node?: ts.Node): node is ts.ImportDeclaration => isDefined(node) && node.kind === ts.SyntaxKind.ImportDeclaration;
+const isTypeAliasDeclaration = (node?: ts.Node): node is ts.TypeAliasDeclaration => isDefined(node) && node.kind === ts.SyntaxKind.TypeAliasDeclaration;
+const isPropertySignature = (node?: ts.Node): node is ts.PropertySignature => isDefined(node) && node.kind === ts.SyntaxKind.PropertySignature;
+const isArrayType = (node?: ts.Node): node is ts.ArrayTypeNode => isDefined(node) && node.kind === ts.SyntaxKind.ArrayType;
+
+const isHandlerFunction = (node: ts.Node): node is ts.VariableStatement => isVariableStatement(node)
+  && node.declarationList.declarations.length === 1
+  && node.declarationList.declarations[0].name.getText() === 'handler'
+  && (node.modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword) ?? false);
 
 type DataSourceRef = {
   variableName: string;
@@ -12,61 +26,67 @@ type DataSourceRef = {
   dataSourceType: string;
 };
 
-export const parseResolver = (sourceFile: ts.SourceFile) => {
+export type ParsedResolver = {
+  graphqlDefinition: DocumentNode;
+  referencedDataSources: DataSourceRef[];
+};
+
+// TK, use type kind to determine type rather than getText
+const getFieldsFromTypeLiteral = (typeLiteral: ts.TypeLiteralNode): FieldDefinition[] => {
+  const fields: FieldDefinition[] = [];
+  typeLiteral.forEachChild(field => {
+    if (isPropertySignature(field) && field.type) {
+      const isArray = isArrayType(field.type);
+      const typeDef = isArray ? field.type.elementType.getText() : field.type.getText();
+      const fieldDef: FieldDefinition = {
+        name: field.name.getText(),
+        type: typeDef,
+      };
+      if (isArray) fieldDef.isArray = true;
+      if (field.questionToken) fieldDef.isOptional = true;
+      fields.push(fieldDef);
+    }
+  });
+  return fields;
+};
+
+export const parseResolver = (sourceFile: ts.SourceFile): ParsedResolver => {
   let requestType: string | ts.TypeLiteralNode | null = null;
   let responseType: string | ts.TypeLiteralNode | null = null;
-  const dataSources: DataSourceRef[] = [];
-  console.log(`In SourceFile: ${sourceFile.fileName}`);
+  const types: TypeDefinition[] = [];
+  const referencedDataSources: DataSourceRef[] = [];
+  const basename = path.basename(sourceFile.fileName, '.ts');
+  const nameParts = basename.split('.');
+  if (nameParts.length !== 2) {
+    throw new Error(`Invalid resolver name: ${basename}`);
+  }
+  const [typeName, fieldName] = nameParts;
   sourceFile.forEachChild((node) => {
     if (isHandlerFunction(node)) {
-      const declarationExp = node.declarationList.declarations[0].initializer!;
-      if (declarationExp.kind === ts.SyntaxKind.ArrowFunction) {
-        const arrowFunc = declarationExp as ts.ArrowFunction;
-        arrowFunc.forEachChild((arrowChild) => {
-          if (arrowChild.kind === ts.SyntaxKind.TypeReference) {
-            const responseTypeReference = arrowChild as ts.TypeReferenceNode;
-            const typeName = responseTypeReference.typeName.getText();
-            console.log(`response type name: ${typeName}`);
-            responseType = typeName;
-          }
-          if (arrowChild.kind === ts.SyntaxKind.TypeLiteral) {
-            const typeLiteral = arrowChild as ts.TypeLiteralNode;
-            console.log(`response type ${typeLiteral.getFullText()}`);
-            responseType = typeLiteral;
-          }
+      const declarationExp = node.declarationList.declarations[0].initializer;
+      if (isArrowFunction(declarationExp)) {
+        declarationExp.forEachChild((arrowChild) => {
+          if (isTypeReference(arrowChild)) responseType = arrowChild.typeName.getText();
+          if (isTypeLiteral(arrowChild)) responseType = arrowChild;
         });
-        arrowFunc.parameters.forEach((param) => {
-          if (param.kind === ts.SyntaxKind.Parameter) {
-            const parameter = param as ts.ParameterDeclaration;
-            const paramType = parameter.type!;
-            if (paramType.kind === ts.SyntaxKind.TypeReference) {
-              const typeReference = paramType as ts.TypeReferenceNode;
-              const typeName = typeReference.typeName.getText();
-              requestType = typeName;
-            }
-            if (paramType.kind === ts.SyntaxKind.TypeLiteral) {
-              const typeLiteral = paramType as ts.TypeLiteralNode;
-              requestType = typeLiteral;
-            }
-          }
+        declarationExp.parameters.forEach((parameter) => {
+          if (isTypeReference(parameter.type)) requestType = parameter.type.typeName.getText();
+          if (isTypeLiteral(parameter.type)) requestType = parameter.type;
         });
-        arrowFunc.body.forEachChild((child) => {
-          if (child.kind === ts.SyntaxKind.VariableStatement) {
-            const variableStatement = child as ts.VariableStatement;
-            const variableDeclaration = variableStatement.declarationList.declarations[0];
+        declarationExp.body.forEachChild((child) => {
+          if (isVariableStatement(child)) {
+            const variableDeclaration = child.declarationList.declarations[0];
             const variableName = variableDeclaration.name.getText();
-            const variableInitializer = variableDeclaration.initializer!;
-            if (variableInitializer.kind === ts.SyntaxKind.CallExpression) {
-              const callExpression = variableInitializer as ts.CallExpression;
-              if (callExpression.expression.kind === ts.SyntaxKind.PropertyAccessExpression) {
-                const propertyAccessExpression = callExpression.expression as ts.PropertyAccessExpression;
-                if (propertyAccessExpression.expression.getText() === 'resolver') {
-                  switch (propertyAccessExpression.name.getText()) {
+            const variableInitializer = variableDeclaration.initializer;
+            if (isCallExpression(variableInitializer)) {
+              if (isPropertyAccessExpression(variableInitializer.expression)) {
+                if (variableInitializer.expression.expression.getText() === 'resolver') {
+                  switch (variableInitializer.expression.name.getText()) {
                     case 'getLambdaDataSource':
-                      dataSources.push({ variableName, dataSourceName: callExpression.arguments[0].getText(), dataSourceType: 'lambda' });
+                      referencedDataSources.push({ variableName, dataSourceName: variableInitializer.arguments[0].getText(), dataSourceType: 'lambda' });
                       break;
                     case 'getDynamoDbDataSource':
-                      dataSources.push({ variableName, dataSourceName: callExpression.arguments[0].getText(), dataSourceType: 'dynamodb' });
+                      referencedDataSources.push({ variableName, dataSourceName: variableInitializer.arguments[0].getText(), dataSourceType: 'dynamodb' });
                       break;
                   }
                 }
@@ -79,36 +99,55 @@ export const parseResolver = (sourceFile: ts.SourceFile) => {
       // Parse out input and output types
       // find invocations of resolver.get*DataSource, and then both 1) track those variables for invocation, and 2) track the required data sources
     }
-    // console.log(node);
+    if (isTypeAliasDeclaration(node)) {
+      const name = node.name.getText();
+      if (isTypeLiteral(node.type)) {
+        types.push({ name, fields: getFieldsFromTypeLiteral(node.type) });
+      }
+    }
   });
-  console.log(`requestType: ${JSON.stringify(requestType, null, 4)}`);
-  console.log(`responseType: ${JSON.stringify(responseType, null, 4)}`);
-  // If request/response types are names we need to go find the type literal definitions
-  console.log(`dataSources: ${JSON.stringify(dataSources, null, 4)}`);
+
+  const mergedRequestType: TypeDefinition | undefined | null = typeof requestType === 'string'
+    ? types.find(type => type.name === requestType)
+    : { name: 'AnonymousRequestType', fields: getFieldsFromTypeLiteral(requestType as unknown as any) };
+
+  const mergedResponseType: TypeDefinition | undefined | null = typeof responseType === 'string'
+    ? types.find(type => type.name === responseType)
+    : { name: 'AnonymousResponseType', fields: getFieldsFromTypeLiteral(responseType as unknown as any) };
+
+  if (mergedRequestType === null || mergedRequestType === undefined || mergedResponseType === null || mergedResponseType === undefined) throw new Error('Expected a requestType and responseType to be found');
+
+  const graphqlDefinition = generateResolverAndTypes({
+    typeName,
+    fieldName,
+    requestType: mergedRequestType,
+    responseType: mergedResponseType,
+  });
+
+  console.log(print(graphqlDefinition));
+  
+  return {
+    referencedDataSources,
+    graphqlDefinition,
+  };
 };
 
 /**
- * Take in a ts.SourceFile object, and ensure a few things. 1) the only require statements are from '../resolver', and 1) that there is an exported method called 'handler'.
+ * Take in a ts.SourceFile object, and ensure a few things.
+ *   1/ the only require statements are from '../resolver'
+ *   2/ that there is an exported method called 'handler'.
  */
-export const validateResolver = (sourceFile: ts.SourceFile) => {
+export const validateResolver = (sourceFile: ts.SourceFile): void => {
   let hasResolverImport = false;
   let hasHandlerExport = false;
   sourceFile.forEachChild((node) => {
-    if (node.kind === ts.SyntaxKind.ImportDeclaration) {
-      const importDeclaration = node as ts.ImportDeclaration;
-      const importText = importDeclaration.moduleSpecifier.getText();
-      if (importText.match('../resolver')) {
-        hasResolverImport = true;
-      } else {
-        throw new Error(`Invalid import: ${importDeclaration.moduleSpecifier.getText()}, only expected resolver import`);
-      }
+    if (isImportDeclaration(node)) {
+      if (node.moduleSpecifier.getText().match('../resolver')) hasResolverImport = true;
+      else throw new Error(`Invalid import: ${node.moduleSpecifier.getText()}, only expected resolver import`);
     }
-    if (node.kind === ts.SyntaxKind.VariableStatement) {
-      if (isHandlerFunction(node)) {
-        hasHandlerExport = true;
-      } else {
-        throw new Error(`Invalid method ${name}, expected only a single exported method named handler.`);
-      }
+    if (isVariableStatement(node)) {
+      if (isHandlerFunction(node)) hasHandlerExport = true;
+      else throw new Error(`Invalid method ${name}, expected only a single exported method named handler.`);
     }
   });
   if (!hasHandlerExport) throw new Error(`No handler export found`);
