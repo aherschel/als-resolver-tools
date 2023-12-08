@@ -1,0 +1,20 @@
+input AddUserRequest {
+  username: String!
+}
+
+type AddUserResponse {
+  userId: String!
+}
+
+type Mutation {
+  addUser(input: AddUserRequest): AddUserResponse
+  deleteUser(input: DeleteUserRequest): DeleteUserResponse
+}
+
+input DeleteUserRequest {
+  username: String!
+}
+
+type DeleteUserResponse {
+  userId: String!
+}

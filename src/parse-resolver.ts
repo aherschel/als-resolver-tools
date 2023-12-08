@@ -1,8 +1,9 @@
 import { ts } from '@ts-morph/bootstrap';
-import { DocumentNode } from 'graphql';
-import { FieldDefinition, TypeDefinition, generateResolverAndTypes } from './graphql-schema-builder';
+import { ParsedGraphqlDefinition, generateResolverAndTypes } from './graphql-schema-builder';
 import * as path from 'path';
+import { FieldDefinition, TypeDefinition } from './types';
 
+// Utility methods which make it easier to walk the ast with strong type-casting along the way.
 const isDefined = <T>(val?: T): val is T => val !== undefined && val !== null;
 const isVariableStatement = (node?: ts.Node): node is ts.VariableStatement => isDefined(node) && node.kind === ts.SyntaxKind.VariableStatement;
 const isArrowFunction = (node?: ts.Node): node is ts.ArrowFunction => isDefined(node) && node.kind === ts.SyntaxKind.ArrowFunction;
@@ -15,7 +16,6 @@ const isTypeAliasDeclaration = (node?: ts.Node): node is ts.TypeAliasDeclaration
 const isPropertySignature = (node?: ts.Node): node is ts.PropertySignature => isDefined(node) && node.kind === ts.SyntaxKind.PropertySignature;
 const isArrayType = (node?: ts.Node): node is ts.ArrayTypeNode => isDefined(node) && node.kind === ts.SyntaxKind.ArrayType;
 const isExpressionStatement = (node?: ts.Node): node is ts.ExpressionStatement => isDefined(node) && node.kind === ts.SyntaxKind.ExpressionStatement;
-
 const isHandlerFunction = (node: ts.Node): node is ts.VariableStatement => isVariableStatement(node)
   && node.declarationList.declarations.length === 1
   && node.declarationList.declarations[0].name.getText() === 'handler'
@@ -28,7 +28,8 @@ type DataSourceRef = {
 };
 
 export type ParsedResolver = {
-  graphqlDefinition: DocumentNode;
+  name: string;
+  parsedGraphqlDefinitions: ParsedGraphqlDefinition[];
   referencedDataSources: DataSourceRef[];
   resolvers: ResolverDef[];
 };
@@ -103,7 +104,6 @@ export const parseResolver = (sourceFile: ts.SourceFile): ParsedResolver => {
                   const methodName = variableInitializer.expression.name.getText();
                   if (referencedDataSources.some(refSource => refSource.variableName === resolverName)) {
                     variableInitializer.arguments.forEach(arg => console.log(arg.getText())); // TK do something with this
-                    console.log(variableInitializer.expression.expression);
                     resolvers.push({
                       resolverName,
                       methodName,
@@ -117,7 +117,6 @@ export const parseResolver = (sourceFile: ts.SourceFile): ParsedResolver => {
           if (isExpressionStatement(child)) {
             if (isCallExpression(child.expression)) {
               if (isPropertyAccessExpression(child.expression.expression)) {
-                console.log(child.expression.expression);
                 const resolverName = child.expression.expression.expression.getText();
                 const methodName = child.expression.expression.name.getText();
                 if (referencedDataSources.some(refSource => refSource.variableName === resolverName)) {
@@ -151,7 +150,7 @@ export const parseResolver = (sourceFile: ts.SourceFile): ParsedResolver => {
 
   if (mergedRequestType === null || mergedRequestType === undefined || mergedResponseType === null || mergedResponseType === undefined) throw new Error('Expected a requestType and responseType to be found');
 
-  const graphqlDefinition = generateResolverAndTypes({
+  const parsedGraphqlDefinitions = generateResolverAndTypes({
     typeName,
     fieldName,
     requestType: mergedRequestType,
@@ -159,9 +158,10 @@ export const parseResolver = (sourceFile: ts.SourceFile): ParsedResolver => {
   });
   
   return {
+    name: `${typeName}.${fieldName}`,
     referencedDataSources,
     resolvers,
-    graphqlDefinition,
+    parsedGraphqlDefinitions,
   };
 };
 
@@ -175,7 +175,7 @@ export const validateResolver = (sourceFile: ts.SourceFile): void => {
   let hasHandlerExport = false;
   sourceFile.forEachChild((node) => {
     if (isImportDeclaration(node)) {
-      if (node.moduleSpecifier.getText().match('../resolver')) hasResolverImport = true;
+      if (node.moduleSpecifier.getText().match('als-resolver-tools')) hasResolverImport = true;
       else throw new Error(`Invalid import: ${node.moduleSpecifier.getText()}, only expected resolver import`);
     }
     if (isVariableStatement(node)) {

@@ -7,18 +7,8 @@ import {
   InputValueDefinitionNode,
   TypeNode,
 } from 'graphql';
+import { TypeDefinition, FieldDefinition } from './types';
 
-export type FieldDefinition = {
-  name: string;
-  type: string;
-  isOptional?: boolean;
-  isArray?: boolean;
-};
-
-export type TypeDefinition = {
-  name: string;
-  fields: FieldDefinition[],
-};
 export type GenerateResolverAndTypesProps = {
   typeName: string;
   fieldName: string;
@@ -66,7 +56,9 @@ const convertFieldToFieldDefinition = (field: FieldDefinition): FieldDefinitionN
   type: generateScalarType(field),
 });
 
-export const generateResolverAndTypes = (props: GenerateResolverAndTypesProps): DocumentNode => {
+export type ParsedGraphqlDefinition = InputObjectTypeDefinitionNode | ObjectTypeDefinitionNode;
+
+export const generateResolverAndTypes = (props: GenerateResolverAndTypesProps): ParsedGraphqlDefinition[] => {
   const { typeName, fieldName, requestType, responseType } = props;
   const requestTypeNode: InputObjectTypeDefinitionNode = {
     kind: Kind.INPUT_OBJECT_TYPE_DEFINITION,
@@ -95,13 +87,32 @@ export const generateResolverAndTypes = (props: GenerateResolverAndTypesProps): 
     name: { kind: Kind.NAME, value: typeName },
     fields: [operationFieldNode],
   };
-  const documentNode: DocumentNode = {
-    kind: Kind.DOCUMENT,
-    definitions: [
-      requestTypeNode,
-      responseTypeNode,
-      operationTypeNode,
-    ],
-  };
-  return documentNode;
+  return [
+    requestTypeNode,
+    responseTypeNode,
+    operationTypeNode,
+  ];
 };
+
+export const mergedDefinitions = (typeNodes: ParsedGraphqlDefinition[][]): DocumentNode => {
+  const mergedNodes: Record<string, ParsedGraphqlDefinition> = {};
+  typeNodes.flat().forEach(typeNode => {
+    const name = typeNode.name.value;
+    const existingNode = mergedNodes[name]
+    if (existingNode) {
+      mergedNodes[name] = {
+        ...existingNode,
+        fields: [
+          ...(existingNode.fields ?? []),
+          ...(typeNode.fields ?? []),
+        ] as unknown as any,
+      };
+    } else {
+      mergedNodes[name] = typeNode;
+    }
+  });
+  return {
+    kind: Kind.DOCUMENT,
+    definitions: Object.values(mergedNodes),
+  };
+}

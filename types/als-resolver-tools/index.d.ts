@@ -12,6 +12,7 @@ export type LambdaDataSource = {
 export type DynamoDbDataSource = {
   put: <DataType = DynamoDbPayload>(key: DynamoDbKey, payload: DynamoDbPayload) => DataType,
   get: <DataType = DynamoDbPayload>(key: DynamoDbKey) => DataType,
+  delete: <DataType = DynamoDbPayload>(key: DynamoDbKey) => DataType,
 };
 
 declare const resolver: {

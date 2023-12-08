@@ -1,5 +1,5 @@
 import { generateResolverAndTypes } from './graphql-schema-builder';
-import { print } from 'graphql';
+import { Kind, print } from 'graphql';
 
 describe('generateResolverAndTypes', () => {
   it('can be invoked', () => {
@@ -31,6 +31,9 @@ describe('generateResolverAndTypes', () => {
         ],
       },
     });
-    expect(print(generatedResolverAndTypes).length).not.toEqual(0);
+    expect(print({
+      kind: Kind.DOCUMENT,
+      definitions: generatedResolverAndTypes,
+    }).length).not.toEqual(0);
   });
 });

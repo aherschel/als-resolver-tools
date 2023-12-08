@@ -1,25 +1,20 @@
 import resolver from 'als-resolver-tools';
 
-type AddUserRequest = {
+type DeleteUserRequest = {
   username: string;
 };
 
-type AddUserResponse = {
+type DeleteUserResponse = {
   userId: string;
 };
 
-export const handler = ({ username }: AddUserRequest): AddUserResponse => {
+export const handler = ({ username }: DeleteUserRequest): DeleteUserResponse => {
   const getUserId = resolver.getLambdaDataSource('getUserId');
   const userStore = resolver.getDynamoDbDataSource('userStore');
    
   const userId = getUserId.invoke<string>({ username });
-   
-  const processedId = `${userId}${userId}`;
-   
-  userStore.put(
-    { partitionKey: userId },
-    { username, processedId },
-  );
+      
+  userStore.delete({ partitionKey: userId });
    
   return { userId };
 };
