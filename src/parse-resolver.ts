@@ -1,25 +1,11 @@
-import { ts } from '@ts-morph/bootstrap';
+import { ts, Node, SourceFile, VariableStatement, TypeNode } from 'ts-morph';
 import { ParsedGraphqlDefinition, generateResolverAndTypes } from './graphql-schema-builder';
-import * as path from 'path';
 import { FieldDefinition, TypeDefinition } from './types';
 
-// Utility methods which make it easier to walk the ast with strong type-casting along the way.
-const isDefined = <T>(val?: T): val is T => val !== undefined && val !== null;
-const isVariableStatement = (node?: ts.Node): node is ts.VariableStatement => isDefined(node) && node.kind === ts.SyntaxKind.VariableStatement;
-const isArrowFunction = (node?: ts.Node): node is ts.ArrowFunction => isDefined(node) && node.kind === ts.SyntaxKind.ArrowFunction;
-const isTypeReference = (node?: ts.Node): node is ts.TypeReferenceNode => isDefined(node) && node.kind === ts.SyntaxKind.TypeReference;
-const isTypeLiteral = (node?: ts.Node): node is ts.TypeLiteralNode => isDefined(node) && node.kind === ts.SyntaxKind.TypeLiteral;
-const isCallExpression = (node?: ts.Node): node is ts.CallExpression => isDefined(node) && node.kind === ts.SyntaxKind.CallExpression;
-const isPropertyAccessExpression = (node?: ts.Node): node is ts.PropertyAccessExpression => isDefined(node) && node.kind === ts.SyntaxKind.PropertyAccessExpression;
-const isImportDeclaration = (node?: ts.Node): node is ts.ImportDeclaration => isDefined(node) && node.kind === ts.SyntaxKind.ImportDeclaration;
-const isTypeAliasDeclaration = (node?: ts.Node): node is ts.TypeAliasDeclaration => isDefined(node) && node.kind === ts.SyntaxKind.TypeAliasDeclaration;
-const isPropertySignature = (node?: ts.Node): node is ts.PropertySignature => isDefined(node) && node.kind === ts.SyntaxKind.PropertySignature;
-const isArrayType = (node?: ts.Node): node is ts.ArrayTypeNode => isDefined(node) && node.kind === ts.SyntaxKind.ArrayType;
-const isExpressionStatement = (node?: ts.Node): node is ts.ExpressionStatement => isDefined(node) && node.kind === ts.SyntaxKind.ExpressionStatement;
-const isHandlerFunction = (node: ts.Node): node is ts.VariableStatement => isVariableStatement(node)
-  && node.declarationList.declarations.length === 1
-  && node.declarationList.declarations[0].name.getText() === 'handler'
-  && (node.modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword) ?? false);
+const isHandlerFunction = (node: Node): node is VariableStatement => Node.isVariableStatement(node)
+  && node.getDeclarationList().getDeclarations().length === 1
+  && node.getDeclarationList().getDeclarations()[0].getNameNode().getText() === 'handler'
+  && (node.getModifiers()?.some((modifier) => modifier.getKind() === ts.SyntaxKind.ExportKeyword) ?? false);
 
 type DataSourceRef = {
   variableName: string;
@@ -34,20 +20,20 @@ export type ParsedResolver = {
   resolvers: ResolverDef[];
 };
 
-// TK, use type kind to determine type rather than getText
-const getFieldsFromTypeLiteral = (typeLiteral: ts.TypeLiteralNode): FieldDefinition[] => {
+const getFieldsFromTypeLiteral = (typeLiteral: TypeNode): FieldDefinition[] => {
   const fields: FieldDefinition[] = [];
   typeLiteral.forEachChild(field => {
-    if (isPropertySignature(field) && field.type) {
-      const isArray = isArrayType(field.type);
-      const typeDef = isArray ? field.type.elementType.getText() : field.type.getText();
-      const fieldDef: FieldDefinition = {
-        name: field.name.getText(),
-        type: typeDef,
-      };
-      if (isArray) fieldDef.isArray = true;
-      if (field.questionToken) fieldDef.isOptional = true;
-      fields.push(fieldDef);
+    if (Node.isPropertySignature(field) && field.getTypeNode()) {
+      const typeNode = field.getTypeNodeOrThrow();
+      const isArray = Node.isArrayTypeNode(typeNode);
+      fields.push({
+        name: field.getNameNode().getText(),
+        type: isArray
+          ? typeNode.getType().getText()
+          : typeNode.getText(),
+        isArray,
+        isOptional: field.getQuestionTokenNode() !== undefined,
+      });
     }
   });
   return fields;
@@ -59,75 +45,73 @@ type ResolverDef = {
   args: any;
 };
 
-export const parseResolver = (sourceFile: ts.SourceFile): ParsedResolver => {
-  let requestType: string | ts.TypeLiteralNode | null = null;
-  let responseType: string | ts.TypeLiteralNode | null = null;
+const getResolverAddressFromSourceFile = (sourceFile: SourceFile): { fieldName: string, typeName: string } => {
+  const baseName = sourceFile.getBaseNameWithoutExtension();
+  const nameParts = baseName.split('.');
+  if (nameParts.length !== 2) throw new Error(`Invalid resolver name: ${baseName}`);
+  const [typeName, fieldName] = nameParts;
+  return { typeName, fieldName };
+};
+
+type GetDataSourceRefProps = {
+  methodName: string;
+  variableName: string;
+  dataSourceName: string;
+};
+
+const getDataSourceRef = ({ methodName, variableName, dataSourceName }: GetDataSourceRefProps): DataSourceRef => {
+  switch (methodName) {
+    case 'getLambdaDataSource': return { variableName, dataSourceName, dataSourceType: 'lambda' };
+    case 'getDynamoDbDataSource': return { variableName, dataSourceName, dataSourceType: 'dynamodb' };
+    default: throw new Error(`Unknown dataSource method: ${methodName}`);
+  }
+};
+
+// TK Think about me
+const collectArguments = (args: Node[]): any[] => args.map(arg => arg);
+
+export const parseResolver = (sourceFile: SourceFile): ParsedResolver => {
+  let requestType: string | TypeNode | null = null;
+  let responseType: string | TypeNode | null = null;
   const types: TypeDefinition[] = [];
   const referencedDataSources: DataSourceRef[] = [];
   const resolvers: ResolverDef[] = [];
-  const basename = path.basename(sourceFile.fileName, '.ts');
-  const nameParts = basename.split('.');
-  if (nameParts.length !== 2) {
-    throw new Error(`Invalid resolver name: ${basename}`);
-  }
-  const [typeName, fieldName] = nameParts;
+  const { typeName, fieldName } = getResolverAddressFromSourceFile(sourceFile);
   sourceFile.forEachChild((node) => {
     if (isHandlerFunction(node)) {
-      const declarationExp = node.declarationList.declarations[0].initializer;
-      if (isArrowFunction(declarationExp)) {
+      const declarationExp = node.getDeclarationList().getDeclarations()[0].getInitializer();
+      if (Node.isArrowFunction(declarationExp)) {
         declarationExp.forEachChild((arrowChild) => {
-          if (isTypeReference(arrowChild)) responseType = arrowChild.typeName.getText();
-          if (isTypeLiteral(arrowChild)) responseType = arrowChild;
+          if (Node.isTypeReference(arrowChild)) responseType = arrowChild.getTypeName().getText();
+          if (Node.isTypeLiteral(arrowChild)) responseType = arrowChild;
         });
-        declarationExp.parameters.forEach((parameter) => {
-          if (isTypeReference(parameter.type)) requestType = parameter.type.typeName.getText();
-          if (isTypeLiteral(parameter.type)) requestType = parameter.type;
+        declarationExp.getParameters().forEach((parameter) => {
+          const parameterType = parameter.getTypeNodeOrThrow();
+          if (Node.isTypeReference(parameterType)) requestType = parameterType.getType().getText();
+          if (Node.isTypeLiteral(parameterType)) requestType = parameterType;
         });
-        declarationExp.body.forEachChild((child) => {
-          if (isVariableStatement(child)) {
-            const variableDeclaration = child.declarationList.declarations[0];
-            const variableName = variableDeclaration.name.getText();
-            const variableInitializer = variableDeclaration.initializer;
-            if (isCallExpression(variableInitializer)) {
-              if (isPropertyAccessExpression(variableInitializer.expression)) {
-                if (variableInitializer.expression.expression.getText() === 'resolver') {
-                  switch (variableInitializer.expression.name.getText()) {
-                    case 'getLambdaDataSource':
-                      referencedDataSources.push({ variableName, dataSourceName: variableInitializer.arguments[0].getText(), dataSourceType: 'lambda' });
-                      break;
-                    case 'getDynamoDbDataSource':
-                      referencedDataSources.push({ variableName, dataSourceName: variableInitializer.arguments[0].getText(), dataSourceType: 'dynamodb' });
-                      break;
-                  }
-                } else {
-                  const resolverName = variableInitializer.expression.expression.getText();
-                  const methodName = variableInitializer.expression.name.getText();
-                  if (referencedDataSources.some(refSource => refSource.variableName === resolverName)) {
-                    variableInitializer.arguments.forEach(arg => console.log(arg.getText())); // TK do something with this
-                    resolvers.push({
-                      resolverName,
-                      methodName,
-                      args: variableInitializer.arguments,
-                    });
-                  }
-                }
+        declarationExp.getBody().forEachChild((child) => {
+          if (Node.isVariableStatement(child)) {
+            const variableDeclaration = child.getDeclarationList().getDeclarations()[0];
+            const variableName = variableDeclaration.getName();
+            const callExpression = variableDeclaration.getInitializerIfKind(ts.SyntaxKind.CallExpression);
+            if (callExpression) {
+              const resolverName = callExpression.getExpressionIfKindOrThrow(ts.SyntaxKind.PropertyAccessExpression).getExpressionIfKindOrThrow(ts.SyntaxKind.Identifier).getText();
+              const methodName = callExpression.getExpressionIfKindOrThrow(ts.SyntaxKind.PropertyAccessExpression).getName();
+              if (resolverName === 'resolver') {
+                referencedDataSources.push(getDataSourceRef({ methodName, variableName, dataSourceName: callExpression.getArguments()[0].getText() }));
+              } else if (referencedDataSources.some(refSource => refSource.variableName === resolverName)) {
+                resolvers.push({ resolverName, methodName, args: collectArguments(callExpression.getArguments()) });
               }
             }
           }
-          if (isExpressionStatement(child)) {
-            if (isCallExpression(child.expression)) {
-              if (isPropertyAccessExpression(child.expression.expression)) {
-                const resolverName = child.expression.expression.expression.getText();
-                const methodName = child.expression.expression.name.getText();
-                if (referencedDataSources.some(refSource => refSource.variableName === resolverName)) {
-                  child.expression.arguments.forEach(arg => console.log(arg.getText())); // TK do something with this
-                  resolvers.push({
-                    resolverName,
-                    methodName,
-                    args: child.expression.arguments,
-                  });
-                }
-              }
+          if (Node.isExpressionStatement(child)) {
+            const callExpression = child.getExpressionIfKindOrThrow(ts.SyntaxKind.CallExpression);
+            const propertyAccessExpression = callExpression.getExpressionIfKindOrThrow(ts.SyntaxKind.PropertyAccessExpression);
+            const methodName = propertyAccessExpression.getName();
+            const resolverName = propertyAccessExpression.getExpressionIfKindOrThrow(ts.SyntaxKind.Identifier).getText();
+            if (referencedDataSources.some(refSource => refSource.variableName === resolverName)) {
+              resolvers.push({ resolverName, methodName, args: collectArguments(callExpression.getArguments()) });
             }
           }
         });
@@ -135,8 +119,8 @@ export const parseResolver = (sourceFile: ts.SourceFile): ParsedResolver => {
       // Process handler function
       // find invocations of resolver.get*DataSource, and then both 1) track those variables for invocation, and 2) track the required data sources
     }
-    if (isTypeAliasDeclaration(node) && isTypeLiteral(node.type)) {
-      types.push({ name: node.name.getText(), fields: getFieldsFromTypeLiteral(node.type) });
+    if (Node.isTypeAliasDeclaration(node) && Node.isTypeLiteral(node.getTypeNode())) {
+      types.push({ name: node.getNameNode().getText(), fields: getFieldsFromTypeLiteral(node.getTypeNodeOrThrow()) });
     }
   });
 
@@ -170,15 +154,15 @@ export const parseResolver = (sourceFile: ts.SourceFile): ParsedResolver => {
  *   1/ the only require statements are from '../resolver'
  *   2/ that there is an exported method called 'handler'.
  */
-export const validateResolver = (sourceFile: ts.SourceFile): void => {
+export const validateResolver = (sourceFile: SourceFile): void => {
   let hasResolverImport = false;
   let hasHandlerExport = false;
   sourceFile.forEachChild((node) => {
-    if (isImportDeclaration(node)) {
-      if (node.moduleSpecifier.getText().match('als-resolver-tools')) hasResolverImport = true;
-      else throw new Error(`Invalid import: ${node.moduleSpecifier.getText()}, only expected resolver import`);
+    if (Node.isImportDeclaration(node)) {
+      if (node.getModuleSpecifier().getText().match('als-resolver-tools')) hasResolverImport = true;
+      else throw new Error(`Invalid import: ${node.getModuleSpecifier().getText()}, only expected resolver import`);
     }
-    if (isVariableStatement(node)) {
+    if (Node.isVariableStatement(node)) {
       if (isHandlerFunction(node)) hasHandlerExport = true;
       else throw new Error(`Invalid method ${name}, expected only a single exported method named handler.`);
     }

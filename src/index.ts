@@ -1,14 +1,15 @@
-import { createProjectSync } from '@ts-morph/bootstrap';
+import { Project } from 'ts-morph';
 import { parseResolver, validateResolver } from './parse-resolver';
 import { mergedDefinitions } from './graphql-schema-builder';
 import { print } from 'graphql';
 import { join } from 'path';
 import { rimrafSync } from 'rimraf';
 import { mkdirSync, writeFileSync } from 'fs';
+import { generateCdkConstructFile } from './cdk-construct-renderer';
 
 // Setup Project Input Files
-const project = createProjectSync();
-project.addSourceFilesByPathsSync(join(__dirname, '..', 'sample-input', 'resolvers', '*.ts'));
+const project = new Project();
+project.addSourceFilesAtPaths(join(__dirname, '..', 'sample-input', 'resolvers', '*.ts'));
 
 // Process Project Files
 project.getSourceFiles().forEach(validateResolver);
