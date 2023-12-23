@@ -1,13 +1,13 @@
 import { ts, Node, SourceFile, VariableStatement, TypeNode, ImportDeclaration, ExportedDeclarations } from 'ts-morph';
-import { ParsedGraphqlDefinition, generateResolverAndTypes } from './graphql-schema-builder';
-import { FieldDefinition, TypeDefinition } from './types';
+import { ParsedGraphqlDefinition, generateResolverAndTypes } from '../writer';
+import { FieldDefinition, TypeDefinition } from '../types';
 
 const isHandlerFunction = (node: Node): node is VariableStatement => Node.isVariableStatement(node)
   && node.getDeclarationList().getDeclarations().length === 1
   && node.getDeclarationList().getDeclarations()[0].getNameNode().getText() === 'handler'
   && (node.getModifiers()?.some((modifier) => modifier.getKind() === ts.SyntaxKind.ExportKeyword) ?? false);
 
-type DataSourceRef = {
+export type DataSourceRef = {
   variableName: string;
   dataSourceName: string;
   dataSourceType: string;

@@ -1,13 +1,9 @@
 import { Project } from 'ts-morph';
-import { parseResolver, validateResolver } from './parse-resolver';
-import { mergedDefinitions } from './graphql-schema-builder';
-import { print } from 'graphql';
 import { join } from 'path';
 import { rimrafSync } from 'rimraf';
 import { mkdirSync, writeFileSync } from 'fs';
-import { getCdkConstructFileWriter } from './cdk-construct-renderer';
-import { getResolverWriter } from './resolver-renderer';
-import { getPipelineFunctionWriter } from './pipeline-function-renderer';
+import { getConstructWriter, getResolverWriter, getPipelineFunctionWriter, writeMergedDefinition } from './writer';
+import { parseResolver, validateResolver } from './parser';
 
 const sampleProjectOutputPath = join(__dirname, '..', 'sample-output');
 rimrafSync(sampleProjectOutputPath);
@@ -30,7 +26,9 @@ parsedResolvers.forEach((parsedResolver) => {
   });
 });
 
-writeFileSync(join(sampleProjectOutputPath, 'schema.graphql'), print(mergedDefinitions(parsedResolvers.map(p => p.parsedGraphqlDefinitions))));
+writeFileSync(join(sampleProjectOutputPath, 'schema.graphql'), writeMergedDefinition(parsedResolvers.map(p => p.parsedGraphqlDefinitions)));
 
-const resolverConstructSourcefile = project.createSourceFile('resolver-constructs.ts', getCdkConstructFileWriter());
+const resolverConstructSourcefile = project.createSourceFile('resolver-constructs.ts', getConstructWriter({
+  dataSources: parsedResolvers.flatMap(p => p.referencedDataSources),
+}));
 writeFileSync(join(sampleProjectOutputPath, resolverConstructSourcefile.getBaseName()), resolverConstructSourcefile.print());

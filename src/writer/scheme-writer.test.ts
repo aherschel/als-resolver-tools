@@ -1,4 +1,4 @@
-import { generateResolverAndTypes } from './graphql-schema-builder';
+import { generateResolverAndTypes } from './schema-writer';
 import { Kind, print } from 'graphql';
 
 describe('generateResolverAndTypes', () => {
