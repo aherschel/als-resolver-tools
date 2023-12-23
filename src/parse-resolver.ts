@@ -1,4 +1,4 @@
-import { ts, Node, SourceFile, VariableStatement, TypeNode } from 'ts-morph';
+import { ts, Node, SourceFile, VariableStatement, TypeNode, ImportDeclaration, ExportedDeclarations } from 'ts-morph';
 import { ParsedGraphqlDefinition, generateResolverAndTypes } from './graphql-schema-builder';
 import { FieldDefinition, TypeDefinition } from './types';
 
@@ -45,7 +45,12 @@ type ResolverDef = {
   args: any;
 };
 
-const getResolverAddressFromSourceFile = (sourceFile: SourceFile): { fieldName: string, typeName: string } => {
+type ResolverAddress = {
+  typeName: string;
+  fieldName: string;
+};
+
+const getResolverAddress = (sourceFile: SourceFile): ResolverAddress => {
   const baseName = sourceFile.getBaseNameWithoutExtension();
   const nameParts = baseName.split('.');
   if (nameParts.length !== 2) throw new Error(`Invalid resolver name: ${baseName}`);
@@ -68,7 +73,9 @@ const getDataSourceRef = ({ methodName, variableName, dataSourceName }: GetDataS
 };
 
 // TK Think about me
-const collectArguments = (args: Node[]): any[] => args.map(arg => arg);
+const collectArguments = (args: Node[]): any[] => {
+  return args.map(arg => arg);
+}
 
 export const parseResolver = (sourceFile: SourceFile): ParsedResolver => {
   let requestType: string | TypeNode | null = null;
@@ -76,7 +83,6 @@ export const parseResolver = (sourceFile: SourceFile): ParsedResolver => {
   const types: TypeDefinition[] = [];
   const referencedDataSources: DataSourceRef[] = [];
   const resolvers: ResolverDef[] = [];
-  const { typeName, fieldName } = getResolverAddressFromSourceFile(sourceFile);
   sourceFile.forEachChild((node) => {
     if (isHandlerFunction(node)) {
       const declarationExp = node.getDeclarationList().getDeclarations()[0].getInitializer();
@@ -134,6 +140,8 @@ export const parseResolver = (sourceFile: SourceFile): ParsedResolver => {
 
   if (mergedRequestType === null || mergedRequestType === undefined || mergedResponseType === null || mergedResponseType === undefined) throw new Error('Expected a requestType and responseType to be found');
 
+  const { typeName, fieldName } = getResolverAddress(sourceFile);
+
   const parsedGraphqlDefinitions = generateResolverAndTypes({
     typeName,
     fieldName,
@@ -149,24 +157,24 @@ export const parseResolver = (sourceFile: SourceFile): ParsedResolver => {
   };
 };
 
+const validateImportDeclarations = (importDeclaration: ImportDeclaration[]): void => {
+  if (importDeclaration.length !== 1 || !importDeclaration[0].getModuleSpecifier().getText().match('als-resolver-tools')) {
+    throw new Error(`Expected a single import for resolver, found ${JSON.stringify(importDeclaration)}`);
+  }
+}
+
+const validateExportedDeclarations = (exportedDeclarations: Record<string, ExportedDeclarations[]>): void => {
+  if (!exportedDeclarations['handler']) {
+    throw new Error(`Expected an exported function named 'handler', found ${JSON.stringify(Object.keys(exports))}`);
+  }
+}
+
 /**
  * Take in a ts.SourceFile object, and ensure a few things.
  *   1/ the only require statements are from '../resolver'
  *   2/ that there is an exported method called 'handler'.
  */
 export const validateResolver = (sourceFile: SourceFile): void => {
-  let hasResolverImport = false;
-  let hasHandlerExport = false;
-  sourceFile.forEachChild((node) => {
-    if (Node.isImportDeclaration(node)) {
-      if (node.getModuleSpecifier().getText().match('als-resolver-tools')) hasResolverImport = true;
-      else throw new Error(`Invalid import: ${node.getModuleSpecifier().getText()}, only expected resolver import`);
-    }
-    if (Node.isVariableStatement(node)) {
-      if (isHandlerFunction(node)) hasHandlerExport = true;
-      else throw new Error(`Invalid method ${name}, expected only a single exported method named handler.`);
-    }
-  });
-  if (!hasHandlerExport) throw new Error(`No handler export found`);
-  if (!hasResolverImport) throw new Error(`No resolver import found`);
+  validateImportDeclarations(sourceFile.getImportDeclarations());
+  validateExportedDeclarations(Object.fromEntries(sourceFile.getExportedDeclarations().entries()));
 };
