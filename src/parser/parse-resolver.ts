@@ -7,10 +7,12 @@ const isHandlerFunction = (node: Node): node is VariableStatement => Node.isVari
   && node.getDeclarationList().getDeclarations()[0].getNameNode().getText() === 'handler'
   && (node.getModifiers()?.some((modifier) => modifier.getKind() === ts.SyntaxKind.ExportKeyword) ?? false);
 
+export type DataSourceType = 'lambda' | 'dynamodb';
+
 export type DataSourceRef = {
   variableName: string;
   dataSourceName: string;
-  dataSourceType: string;
+  dataSourceType: DataSourceType;
 };
 
 export type ParsedResolver = {
