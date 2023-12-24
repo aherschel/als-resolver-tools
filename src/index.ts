@@ -1,4 +1,4 @@
-import { Project } from 'ts-morph';
+import { Project, ScriptKind } from 'ts-morph';
 import { join } from 'path';
 import { rimrafSync } from 'rimraf';
 import { mkdirSync, writeFileSync } from 'fs';
@@ -30,5 +30,7 @@ writeFileSync(join(sampleProjectOutputPath, 'schema.graphql'), writeMergedDefini
 
 const resolverConstructSourcefile = project.createSourceFile('resolver-constructs.ts', getConstructWriter({
   dataSources: parsedResolvers.flatMap(p => p.referencedDataSources),
-}));
+}), {
+  scriptKind: ScriptKind.TS,
+});
 writeFileSync(join(sampleProjectOutputPath, resolverConstructSourcefile.getBaseName()), resolverConstructSourcefile.print());
