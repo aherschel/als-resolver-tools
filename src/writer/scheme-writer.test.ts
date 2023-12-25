@@ -4,8 +4,10 @@ import { Kind, print } from 'graphql';
 describe('generateResolverAndTypes', () => {
   it('can be invoked', () => {
     const generatedResolverAndTypes = generateResolverAndTypes({
-      typeName: 'Query',
-      fieldName: 'echo',
+      address: {
+        typeName: 'Query',
+        fieldName: 'echo',
+      },
       requestType: {
         name: 'EchoRequest',
         fields: [

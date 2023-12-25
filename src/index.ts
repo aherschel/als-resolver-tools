@@ -1,9 +1,10 @@
-import { Project, ScriptKind } from 'ts-morph';
+import { Project } from 'ts-morph';
 import { join } from 'path';
 import { rimrafSync } from 'rimraf';
 import { mkdirSync, writeFileSync } from 'fs';
 import { getConstructWriter, getResolverWriter, getPipelineFunctionWriter, writeMergedDefinition } from './writer';
 import { parseResolver, validateResolver } from './parser';
+import { addressFileName, functionFileName } from './address-utils';
 
 const sampleProjectOutputPath = join(__dirname, '..', 'sample-output');
 rimrafSync(sampleProjectOutputPath);
@@ -18,19 +19,15 @@ const parsedResolvers = project.getSourceFiles().map((sourceFile) => {
 });
 
 parsedResolvers.forEach((parsedResolver) => {
-  const resolverSourceFile = project.createSourceFile(`${parsedResolver.name}.js`, getResolverWriter());
+  const resolverSourceFile = project.createSourceFile(addressFileName(parsedResolver.address), getResolverWriter());
   writeFileSync(join(sampleProjectOutputPath, resolverSourceFile.getBaseName()), resolverSourceFile.print());
-  parsedResolver.resolvers.forEach((resolver) => {
-    const pipelineFunctionSourceFile = project.createSourceFile(`${parsedResolver.name}.${resolver.resolverName}.js`, getPipelineFunctionWriter('request block', 'response block'));
+  parsedResolver.pipelineFunctions.forEach(pipelineFunction => {
+    const pipelineFunctionSourceFile = project.createSourceFile(functionFileName(parsedResolver.address, pipelineFunction.name), getPipelineFunctionWriter('requestBlock', 'responseBlock'));
     writeFileSync(join(sampleProjectOutputPath, pipelineFunctionSourceFile.getBaseName()), pipelineFunctionSourceFile.print());
   });
 });
 
 writeFileSync(join(sampleProjectOutputPath, 'schema.graphql'), writeMergedDefinition(parsedResolvers.map(p => p.parsedGraphqlDefinitions)));
 
-const resolverConstructSourcefile = project.createSourceFile('resolver-constructs.ts', getConstructWriter({
-  dataSources: parsedResolvers.flatMap(p => p.referencedDataSources),
-}), {
-  scriptKind: ScriptKind.TS,
-});
+const resolverConstructSourcefile = project.createSourceFile('resolver-constructs.ts', getConstructWriter(parsedResolvers));
 writeFileSync(join(sampleProjectOutputPath, resolverConstructSourcefile.getBaseName()), resolverConstructSourcefile.print());

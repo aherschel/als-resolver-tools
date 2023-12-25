@@ -1,26 +1,11 @@
 import { ts, Node, SourceFile, VariableStatement, TypeNode, ImportDeclaration, ExportedDeclarations } from 'ts-morph';
-import { ParsedGraphqlDefinition, generateResolverAndTypes } from '../writer';
-import { FieldDefinition, TypeDefinition } from '../types';
+import { generateResolverAndTypes } from '../writer';
+import { DataSourceRef, FieldDefinition, ParsedResolver, ResolverAddress, PipelineFunctionDef, TypeDefinition } from '../types';
 
 const isHandlerFunction = (node: Node): node is VariableStatement => Node.isVariableStatement(node)
   && node.getDeclarationList().getDeclarations().length === 1
   && node.getDeclarationList().getDeclarations()[0].getNameNode().getText() === 'handler'
   && (node.getModifiers()?.some((modifier) => modifier.getKind() === ts.SyntaxKind.ExportKeyword) ?? false);
-
-export type DataSourceType = 'lambda' | 'dynamodb';
-
-export type DataSourceRef = {
-  variableName: string;
-  dataSourceName: string;
-  dataSourceType: DataSourceType;
-};
-
-export type ParsedResolver = {
-  name: string;
-  parsedGraphqlDefinitions: ParsedGraphqlDefinition[];
-  referencedDataSources: DataSourceRef[];
-  resolvers: ResolverDef[];
-};
 
 const getFieldsFromTypeLiteral = (typeLiteral: TypeNode): FieldDefinition[] => {
   const fields: FieldDefinition[] = [];
@@ -39,17 +24,6 @@ const getFieldsFromTypeLiteral = (typeLiteral: TypeNode): FieldDefinition[] => {
     }
   });
   return fields;
-};
-
-type ResolverDef = {
-  resolverName: string;
-  methodName: string;
-  args: any;
-};
-
-type ResolverAddress = {
-  typeName: string;
-  fieldName: string;
 };
 
 const getResolverAddress = (sourceFile: SourceFile): ResolverAddress => {
@@ -84,7 +58,7 @@ export const parseResolver = (sourceFile: SourceFile): ParsedResolver => {
   let responseType: string | TypeNode | null = null;
   const types: TypeDefinition[] = [];
   const referencedDataSources: DataSourceRef[] = [];
-  const resolvers: ResolverDef[] = [];
+  const pipelineFunctions: PipelineFunctionDef[] = [];
   sourceFile.forEachChild((node) => {
     if (isHandlerFunction(node)) {
       const declarationExp = node.getDeclarationList().getDeclarations()[0].getInitializer();
@@ -104,12 +78,12 @@ export const parseResolver = (sourceFile: SourceFile): ParsedResolver => {
             const variableName = variableDeclaration.getName();
             const callExpression = variableDeclaration.getInitializerIfKind(ts.SyntaxKind.CallExpression);
             if (callExpression) {
-              const resolverName = callExpression.getExpressionIfKindOrThrow(ts.SyntaxKind.PropertyAccessExpression).getExpressionIfKindOrThrow(ts.SyntaxKind.Identifier).getText();
+              const name = callExpression.getExpressionIfKindOrThrow(ts.SyntaxKind.PropertyAccessExpression).getExpressionIfKindOrThrow(ts.SyntaxKind.Identifier).getText();
               const methodName = callExpression.getExpressionIfKindOrThrow(ts.SyntaxKind.PropertyAccessExpression).getName();
-              if (resolverName === 'resolver') {
+              if (name === 'resolver') {
                 referencedDataSources.push(getDataSourceRef({ methodName, variableName, dataSourceName: callExpression.getArguments()[0].getText() }));
-              } else if (referencedDataSources.some(refSource => refSource.variableName === resolverName)) {
-                resolvers.push({ resolverName, methodName, args: collectArguments(callExpression.getArguments()) });
+              } else if (referencedDataSources.some(refSource => refSource.variableName === name)) {
+                pipelineFunctions.push({ name, methodName, args: collectArguments(callExpression.getArguments()) });
               }
             }
           }
@@ -117,9 +91,9 @@ export const parseResolver = (sourceFile: SourceFile): ParsedResolver => {
             const callExpression = child.getExpressionIfKindOrThrow(ts.SyntaxKind.CallExpression);
             const propertyAccessExpression = callExpression.getExpressionIfKindOrThrow(ts.SyntaxKind.PropertyAccessExpression);
             const methodName = propertyAccessExpression.getName();
-            const resolverName = propertyAccessExpression.getExpressionIfKindOrThrow(ts.SyntaxKind.Identifier).getText();
-            if (referencedDataSources.some(refSource => refSource.variableName === resolverName)) {
-              resolvers.push({ resolverName, methodName, args: collectArguments(callExpression.getArguments()) });
+            const name = propertyAccessExpression.getExpressionIfKindOrThrow(ts.SyntaxKind.Identifier).getText();
+            if (referencedDataSources.some(refSource => refSource.variableName === name)) {
+              pipelineFunctions.push({ name, methodName, args: collectArguments(callExpression.getArguments()) });
             }
           }
         });
@@ -142,19 +116,18 @@ export const parseResolver = (sourceFile: SourceFile): ParsedResolver => {
 
   if (mergedRequestType === null || mergedRequestType === undefined || mergedResponseType === null || mergedResponseType === undefined) throw new Error('Expected a requestType and responseType to be found');
 
-  const { typeName, fieldName } = getResolverAddress(sourceFile);
+  const address = getResolverAddress(sourceFile);
 
   const parsedGraphqlDefinitions = generateResolverAndTypes({
-    typeName,
-    fieldName,
+    address,
     requestType: mergedRequestType,
     responseType: mergedResponseType,
   });
   
   return {
-    name: `${typeName}.${fieldName}`,
+    address,
     referencedDataSources,
-    resolvers,
+    pipelineFunctions,
     parsedGraphqlDefinitions,
   };
 };

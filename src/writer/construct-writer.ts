@@ -1,13 +1,9 @@
 import { CodeBlockWriter } from 'ts-morph';
-import { DataSourceRef, DataSourceType } from '../parser';
-
-export type GetConstructWriterProps = {
-  dataSources: DataSourceRef[];
-};
+import { DataSourceRef, DataSourceType, ParsedResolver, ResolverAddress } from '../types';
+import { addressFileName, addressResolverName, functionFileName } from '../address-utils';
 
 type DataSourceTypeConfig = {
   propSuffix: string;
-  propType: string;
   importedNamespace: string;
   importCdkSuffix: string;
   dataSourceConstructor: string;
@@ -16,14 +12,12 @@ type DataSourceTypeConfig = {
 const DATASOURCETYPE_CONFIG: Record<DataSourceType, DataSourceTypeConfig> = {
   lambda: {
     propSuffix: 'Function',
-    propType: 'lambda.Function',
     importedNamespace: 'lambda',
     importCdkSuffix: 'aws-lambda',
     dataSourceConstructor: 'addLambdaDataSource',
   },
   dynamodb: {
     propSuffix: 'Table',
-    propType: 'dynamodb.Table',
     importedNamespace: 'dynamodb',
     importCdkSuffix: 'aws-dynamodb',
     dataSourceConstructor: 'addDynamoDbDataSource',
@@ -32,8 +26,10 @@ const DATASOURCETYPE_CONFIG: Record<DataSourceType, DataSourceTypeConfig> = {
 
 const propNameFromDataSource = (dataSource: DataSourceRef): string => `${dataSource.variableName}${propSuffixFromDataSource(dataSource)}`;
 const propSuffixFromDataSource = ({ dataSourceType }: DataSourceRef): string => DATASOURCETYPE_CONFIG[dataSourceType].propSuffix;
-const propTypeFromDataSource = ({ dataSourceType }: DataSourceRef): string => DATASOURCETYPE_CONFIG[dataSourceType].propType
-const importFromDataSource = ({ dataSourceType }: DataSourceRef): string => `import * as ${DATASOURCETYPE_CONFIG[dataSourceType].importedNamespace} from 'aws-cdk-lib/${DATASOURCETYPE_CONFIG[dataSourceType].importCdkSuffix}';`;
+const importedNamespaceFromDataSource = ({ dataSourceType }: DataSourceRef): string => DATASOURCETYPE_CONFIG[dataSourceType].importedNamespace;
+const cdkImportSuffixFromDataSource = ({ dataSourceType }: DataSourceRef): string => DATASOURCETYPE_CONFIG[dataSourceType].importCdkSuffix;
+const importFromDataSource = (dataSource: DataSourceRef): string => `import * as ${importedNamespaceFromDataSource(dataSource)} from 'aws-cdk-lib/${cdkImportSuffixFromDataSource(dataSource)}';`;
+const propTypeFromDataSource = (dataSource: DataSourceRef): string => `${importedNamespaceFromDataSource(dataSource)}.${propSuffixFromDataSource(dataSource)}`;
 const variableNameFromDataSource = ({ variableName }: DataSourceRef): string => `${variableName}DataSource`;
 const constructorFromDataSource = ({ dataSourceType }: DataSourceRef): string => DATASOURCETYPE_CONFIG[dataSourceType].dataSourceConstructor;
 const variableDeclarationFromDataSource = (dataSource: DataSourceRef): string => `const ${variableNameFromDataSource(dataSource)} = props.api.${constructorFromDataSource(dataSource)}('${variableNameFromDataSource(dataSource)}', props.${propNameFromDataSource(dataSource)});`;
@@ -57,8 +53,52 @@ const computeDataSourceInputs = (dataSources: DataSourceRef[]): DataSourceStatem
   };
 };
 
-export const getConstructWriter = ({ dataSources }: GetConstructWriterProps) => (writer: CodeBlockWriter) => {
-  const dataSourceInputs = computeDataSourceInputs(dataSources);
+type ResolverDefinition = {
+  address: ResolverAddress;
+  pipelineFunctionNames: string[];
+};
+
+const computeResolvers = (resolvers: ParsedResolver[], ): ResolverDefinition[] => resolvers.map(({ address, pipelineFunctions }) => ({
+  address,
+  pipelineFunctionNames: pipelineFunctions.map(f => f.name),
+}));
+
+const pipelineFunctionVariableName = (address: ResolverAddress, functionName: string): string => `${address.fieldName}${address.typeName}${functionName}`;
+
+const writeResolver = (writer: CodeBlockWriter, { address, pipelineFunctionNames }: ResolverDefinition): void => {
+  const referencedFunctions = pipelineFunctionNames.map(functionName => pipelineFunctionVariableName(address, functionName));
+  writer.write(`props.api.createResolver('${addressResolverName(address)}',`);
+  writer.block(() => {
+    writer.writeLine(`typeName: '${address.typeName}',`);
+    writer.writeLine(`fieldName: '${address.fieldName}',`);
+    writer.writeLine(`code: appsync.Code.fromAsset('${addressFileName(address)}'),`);
+    writer.writeLine('runtime: appsync.FunctionRuntime.JS_1_0_0,');
+    writer.writeLine('pipelineConfig: [');
+    referencedFunctions.forEach(functionName => {
+      writer.indent();
+      writer.writeLine(`${functionName},`);
+    });
+    writer.writeLine('],');
+  })
+  writer.write(');');
+}
+
+const writePipelineFunction = (writer: CodeBlockWriter, address: ResolverAddress, pipelineFunctionName: string): void => {
+  const fnName = pipelineFunctionVariableName(address, pipelineFunctionName);
+  writer.write(`const ${fnName} = new appsync.AppsyncFunction(this, '${fnName}',`)
+  writer.block(() => {
+    writer.writeLine(`name: '${fnName}',`);
+    writer.writeLine('api: props.api,');
+    writer.writeLine(`dataSource: ${variableNameFromDataSource({ variableName: pipelineFunctionName } as any)},`);
+    writer.writeLine(`code: appsync.Code.fromAsset('${functionFileName(address, pipelineFunctionName)}')`);
+    writer.writeLine('runtime: appsync.FunctionRuntime.JS_1_0_0,');
+  });
+  writer.write(');');
+};
+
+export const getConstructWriter = (resolvers: ParsedResolver[]) => (writer: CodeBlockWriter) => {
+  const resolverDefinitions = computeResolvers(resolvers);
+  const dataSourceInputs = computeDataSourceInputs(resolvers.flatMap(p => p.referencedDataSources));
   writer.writeLine('import { Construct } from \'constructs\';');
   writer.writeLine('import * as appsync from \'aws-cdk-lib/aws-appsync\';');
   dataSourceInputs.importRows.forEach(importRow => writer.writeLine(importRow));
@@ -78,10 +118,14 @@ export const getConstructWriter = ({ dataSources }: GetConstructWriterProps) => 
       dataSourceInputs.definitions.forEach(definition => writer.writeLine(definition));
       writer.blankLine(),
       writer.writeLine('// Create Functions');
-      writer.writeLine('// TK');
+      resolverDefinitions.forEach(({ address, pipelineFunctionNames }) => {
+        pipelineFunctionNames.forEach(pipelineFunctionName => {
+          writePipelineFunction(writer, address, pipelineFunctionName);
+        });
+      });
       writer.blankLine(),
       writer.writeLine('// Create Resolvers');
-      writer.writeLine('// TK');
+      resolverDefinitions.forEach(resolver => writeResolver(writer, resolver));
     });
   });
 };
