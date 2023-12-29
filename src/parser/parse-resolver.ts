@@ -1,4 +1,4 @@
-import { ts, Node, SourceFile, VariableStatement, TypeNode, ImportDeclaration, ExportedDeclarations } from 'ts-morph';
+import { ts, Node, SourceFile, VariableStatement, TypeNode, ImportDeclaration, ExportedDeclarations, printNode, CallExpression, ObjectLiteralElementLike, SyntaxKind } from 'ts-morph';
 import { generateResolverAndTypes } from '../writer';
 import { DataSourceRef, FieldDefinition, ParsedResolver, ResolverAddress, PipelineFunctionDef, TypeDefinition } from '../types';
 
@@ -53,6 +53,78 @@ const collectArguments = (args: Node[]): any[] => {
   return args.map(arg => arg);
 }
 
+const produceDynamoDbGetItemExpression = (callExpression: CallExpression): ts.Expression => {
+  // Todo: wire through callExpression
+  return ts.factory.createObjectLiteralExpression([
+    ts.factory.createPropertyAssignment('operation', ts.factory.createStringLiteral('GetItem', true)),
+    ts.factory.createPropertyAssignment('key', ts.factory.createObjectLiteralExpression([])),
+  ], true);
+};
+
+const produceDynamoDbPutItemExpression = (callExpression: CallExpression): ts.Expression => {
+  const args = callExpression.getArguments();
+  if (args.length !== 2) throw new Error(`Unexpected 2 arguments for putItem, found: ${args.length}`);
+  const [key, attributeValues] = args;
+  if (!Node.isObjectLiteralExpression(key) || !Node.isObjectLiteralExpression(attributeValues)) throw new Error(`Expected object literal expression for putItem key and attribute params`);
+  const keyFields: ts.ObjectLiteralElementLike[] = [];
+  key.getProperties().forEach(property => {
+    if (Node.isPropertyAssignment(property)) {
+      keyFields.push(ts.factory.createPropertyAssignment(property.getName(), property.getInitializerOrThrow().compilerNode));
+    }
+    if (Node.isShorthandPropertyAssignment(property)) {
+      keyFields.push(ts.factory.createShorthandPropertyAssignment(property.getName()));
+    }
+  });
+  const attributeFields: ts.ObjectLiteralElementLike[] = [];
+  attributeValues.getProperties().forEach(property => {
+    if (Node.isPropertyAssignment(property)) {
+      attributeFields.push(ts.factory.createPropertyAssignment(property.getName(), property.getInitializerOrThrow().compilerNode));
+    }
+    if (Node.isShorthandPropertyAssignment(property)) {
+      attributeFields.push(ts.factory.createShorthandPropertyAssignment(property.getName()));
+    }
+  });
+  return ts.factory.createObjectLiteralExpression([
+    ts.factory.createPropertyAssignment('operation', ts.factory.createStringLiteral('PutItem', true)),
+    ts.factory.createPropertyAssignment('key', ts.factory.createObjectLiteralExpression(keyFields)),
+    ts.factory.createPropertyAssignment('attributeValues', ts.factory.createObjectLiteralExpression(attributeFields)),
+  ], true);
+};
+
+const produceDynamoDbDeleteItemExpression = (callExpression: CallExpression): ts.Expression => {
+  // Todo: wire through callExpression
+  return ts.factory.createObjectLiteralExpression([
+    ts.factory.createPropertyAssignment('operation', ts.factory.createStringLiteral('DeleteItem', true)),
+    ts.factory.createPropertyAssignment('key', ts.factory.createObjectLiteralExpression([])),
+  ], true);
+};
+
+const produceLambdaInvokeExpression = (callExpression: CallExpression): ts.Expression => {
+  // Todo: wire through callExpression
+  return ts.factory.createObjectLiteralExpression([
+    ts.factory.createPropertyAssignment('operation', ts.factory.createStringLiteral('Invoke', true)),
+    ts.factory.createPropertyAssignment('payload', ts.factory.createObjectLiteralExpression([])),
+  ], true);
+};
+
+const produceResolverExpression = ({ dataSource, methodName, callExpression }: { dataSource: DataSourceRef, methodName: string, callExpression: CallExpression }): ts.Expression => {
+  switch (dataSource.dataSourceType) {
+    case 'dynamodb': switch (methodName) {
+      case 'get': return produceDynamoDbGetItemExpression(callExpression);
+      case 'put': return produceDynamoDbPutItemExpression(callExpression);
+      case 'delete': return produceDynamoDbDeleteItemExpression(callExpression);
+      default: throw new Error(`Unexpected dynamodb method name: ${methodName}`);
+    }
+    case 'lambda': switch (methodName) {
+      case 'invoke': return produceLambdaInvokeExpression(callExpression);
+      default: throw new Error(`Unexpected lambda method name: ${methodName}`);
+    }
+    default: throw new Error(`Unexpected datasource type ${dataSource.dataSourceType}`);
+  }
+};
+
+const produceResolverInvocationStatement = (props: { dataSource: DataSourceRef, methodName: string, callExpression: CallExpression }): string => printNode(ts.factory.createReturnStatement(produceResolverExpression(props)));
+
 export const parseResolver = (sourceFile: SourceFile): ParsedResolver => {
   let requestType: string | TypeNode | null = null;
   let responseType: string | TypeNode | null = null;
@@ -85,9 +157,14 @@ export const parseResolver = (sourceFile: SourceFile): ParsedResolver => {
               const methodName = callExpression.getExpressionIfKindOrThrow(ts.SyntaxKind.PropertyAccessExpression).getName();
               if (name === 'resolver') {
                 referencedDataSources.push(getDataSourceRef({ methodName, variableName, dataSourceName: callExpression.getArguments()[0].getText() }));
-              } else if (referencedDataSources.some(refSource => refSource.variableName === name)) {
-                pipelineFunctions.push({ name, methodName, args: collectArguments(callExpression.getArguments()), statements: [...currFunctionStatements] });
-                currFunctionStatements = [];
+              } else {
+                const matchingDataSourceRefs = referencedDataSources.filter(refSource => refSource.variableName === name);
+                if (matchingDataSourceRefs.length === 1) {
+                  const dataSource = matchingDataSourceRefs[0];
+                  currFunctionStatements.push(produceResolverInvocationStatement({ dataSource, methodName, callExpression }));
+                  pipelineFunctions.push({ name, methodName, args: collectArguments(callExpression.getArguments()), statements: [...currFunctionStatements] });
+                  currFunctionStatements = [];
+                }
               }
             }
           }
@@ -96,7 +173,10 @@ export const parseResolver = (sourceFile: SourceFile): ParsedResolver => {
             const propertyAccessExpression = callExpression.getExpressionIfKindOrThrow(ts.SyntaxKind.PropertyAccessExpression);
             const methodName = propertyAccessExpression.getName();
             const name = propertyAccessExpression.getExpressionIfKindOrThrow(ts.SyntaxKind.Identifier).getText();
-            if (referencedDataSources.some(refSource => refSource.variableName === name)) {
+            const matchingDataSourceRefs = referencedDataSources.filter(refSource => refSource.variableName === name);
+            if (matchingDataSourceRefs.length === 1) {
+              const dataSource = matchingDataSourceRefs[0];
+              currFunctionStatements.push(produceResolverInvocationStatement({ dataSource, methodName, callExpression }));
               pipelineFunctions.push({ name, methodName, args: collectArguments(callExpression.getArguments()), statements: [...currFunctionStatements] });
               currFunctionStatements = [];
             }

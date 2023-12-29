@@ -18,7 +18,7 @@ export const handler = ({ username }: AddUserRequest): AddUserResponse => {
    
   userStore.put(
     { partitionKey: userId },
-    { username, processedId },
+    { username, processedId, created: 'true', valueX: 2 + 2 },
   );
    
   return { userId };
