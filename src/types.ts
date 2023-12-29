@@ -24,6 +24,7 @@ export type PipelineFunctionDef = {
   name: string;
   methodName: string;
   args: any;
+  statements: string[];
 };
 
 export type ResolverAddress = {

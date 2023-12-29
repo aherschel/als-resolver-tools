@@ -1,6 +1,6 @@
 import { util } from '@aws-appsync/utils';
 export function request(ctx) {
-    requestBlock;
+    userStore.delete({ partitionKey: userId });
 }
 export function response(ctx) {
     responseBlock;

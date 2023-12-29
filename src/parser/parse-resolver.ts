@@ -59,6 +59,7 @@ export const parseResolver = (sourceFile: SourceFile): ParsedResolver => {
   const types: TypeDefinition[] = [];
   const referencedDataSources: DataSourceRef[] = [];
   const pipelineFunctions: PipelineFunctionDef[] = [];
+  let currFunctionStatements: string[] = [];
   sourceFile.forEachChild((node) => {
     if (isHandlerFunction(node)) {
       const declarationExp = node.getDeclarationList().getDeclarations()[0].getInitializer();
@@ -73,6 +74,8 @@ export const parseResolver = (sourceFile: SourceFile): ParsedResolver => {
           if (Node.isTypeLiteral(parameterType)) requestType = parameterType;
         });
         declarationExp.getBody().forEachChild((child) => {
+          // TK, not sure if this is right
+          currFunctionStatements.push(child.print());
           if (Node.isVariableStatement(child)) {
             const variableDeclaration = child.getDeclarationList().getDeclarations()[0];
             const variableName = variableDeclaration.getName();
@@ -83,7 +86,8 @@ export const parseResolver = (sourceFile: SourceFile): ParsedResolver => {
               if (name === 'resolver') {
                 referencedDataSources.push(getDataSourceRef({ methodName, variableName, dataSourceName: callExpression.getArguments()[0].getText() }));
               } else if (referencedDataSources.some(refSource => refSource.variableName === name)) {
-                pipelineFunctions.push({ name, methodName, args: collectArguments(callExpression.getArguments()) });
+                pipelineFunctions.push({ name, methodName, args: collectArguments(callExpression.getArguments()), statements: [...currFunctionStatements] });
+                currFunctionStatements = [];
               }
             }
           }
@@ -93,7 +97,8 @@ export const parseResolver = (sourceFile: SourceFile): ParsedResolver => {
             const methodName = propertyAccessExpression.getName();
             const name = propertyAccessExpression.getExpressionIfKindOrThrow(ts.SyntaxKind.Identifier).getText();
             if (referencedDataSources.some(refSource => refSource.variableName === name)) {
-              pipelineFunctions.push({ name, methodName, args: collectArguments(callExpression.getArguments()) });
+              pipelineFunctions.push({ name, methodName, args: collectArguments(callExpression.getArguments()), statements: [...currFunctionStatements] });
+              currFunctionStatements = [];
             }
           }
         });

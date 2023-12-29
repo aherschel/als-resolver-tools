@@ -22,7 +22,7 @@ parsedResolvers.forEach((parsedResolver) => {
   const resolverSourceFile = project.createSourceFile(addressFileName(parsedResolver.address), getResolverWriter());
   writeFileSync(join(sampleProjectOutputPath, resolverSourceFile.getBaseName()), resolverSourceFile.print());
   parsedResolver.pipelineFunctions.forEach(pipelineFunction => {
-    const pipelineFunctionSourceFile = project.createSourceFile(functionFileName(parsedResolver.address, pipelineFunction.name), getPipelineFunctionWriter('requestBlock', 'responseBlock'));
+    const pipelineFunctionSourceFile = project.createSourceFile(functionFileName(parsedResolver.address, pipelineFunction.name), getPipelineFunctionWriter(pipelineFunction.statements, ['responseBlock']));
     writeFileSync(join(sampleProjectOutputPath, pipelineFunctionSourceFile.getBaseName()), pipelineFunctionSourceFile.print());
   });
 });
